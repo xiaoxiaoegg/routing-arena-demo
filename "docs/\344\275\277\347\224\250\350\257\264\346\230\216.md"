@@ -1,0 +1,115 @@
+# routing-arena-demo 使用说明
+
+> 路由策略池竞技场：用历史日志回放，让不同"选渠道策略"同场 PK，用数据决出最优解。
+> 设计/原理见 `docs/方案-v6.md`；接入主项目见 `docs/接入生产网关-4步计划.md`。
+
+---
+
+## 一、环境要求
+
+- Go ≥ 1.26（`go.mod` 声明 1.26.5）
+- 无需任何第三方依赖、无需数据库、无需 API key
+- macOS / Linux 均可
+
+## 二、5 分钟快速体验
+
+```bash
+cd ~/Desktop/routing-arena-demo
+
+go test ./...          # ① 全量测试（12 包，~10 秒）
+
+go run ./cmd/arena     # ② 竞技场对比表：S0/S1/S2 谁更省、更快（带 95% 置信区间）
+
+go run ./cmd/p4        # ③ 第三波能力演示：自适应权重/粘性/约束选路/指标下钻
+
+go run ./cmd/admin     # ④ 管理后台（浏览器开 http://localhost:8080）
+```
+
+> 所有命令**不传任何参数**即可跑（默认模拟数据，固定 seed 可复现）。
+
+## 三、命令手册
+
+| 命令 | 回答什么问题 | 看什么输出 |
+|---|---|---|
+| `go run ./cmd/arena` | 哪个策略最该晋升？ | 各策略总成本/平均延迟/节省率 ±95%CI + 晋升建议 |
+| `go run ./cmd/scenarios` | 换场景结论还成立吗？ | 5 场景矩阵（正常/单点故障/限流/涨价/高峰并发） |
+| `go run ./cmd/p1` | 小流量切 5% 会怎样？ | 混合流量 vs 理论预期的偏差（上线前验证） |
+| `go run ./cmd/p2` | 看板选优怎么玩？ | 候选策略评分 + 晋升/回退演示 |
+| `go run ./cmd/p3` | 故障时策略会不会自我修复？ | 健康探测 → 自动切换 → 二次确认 → 留痕全流程 |
+| `go run ./cmd/p4` | 策略能力上限在哪？ | 自适应权重/粘性(sticky)/约束选路 S5/指标下钻 4 分区 |
+| `go run ./cmd/admin` | 可视化运营后台 | 浏览器界面 + REST API（见第四节） |
+
+### 通用参数（大部分命令支持）
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `-records N` | 各命令不同（2000~6000） | 模拟数据条数 |
+| `-seed N` | 42 | 随机种子，固定 = 结果完全可复现 |
+| `-csv 路径` | 空 | 用自己的 CSV 代替模拟数据（格式见 `testdata/sample_logs.csv`） |
+| `-strategy ID` | S1_MinCost | p1/p2 的候选策略（S0_Champion/S1_MinCost/S2_MinLat/S3_Hybrid/S4_Robust/S5_Constrained） |
+| `-train 比例` | 0.7 | 训练集占比（其余样本外评估） |
+
+示例：
+
+```bash
+go run ./cmd/arena -records 10000 -seed 7        # 大样本、换种子
+go run ./cmd/p1 -strategy S3_Hybrid -ratio 0.05  # 拿 S3 做小流量验证
+go run ./cmd/scenarios -records 5000             # 场景矩阵加大样本
+```
+
+## 四、管理后台（cmd/admin）
+
+### 启动
+
+```bash
+go run ./cmd/admin                              # 开发模式（无鉴权），:8080
+ADMIN_TOKEN=secret go run ./cmd/admin           # 开启鉴权（变更 API 需 Bearer token）
+go run ./cmd/admin -data ./data                 # 审计落盘：切换历史/告警写 JSONL，重启可恢复
+ADMIN_PORT=9000 go run ./cmd/admin              # 换端口（茶安占 8080 时用）
+```
+
+### API
+
+| 方法/路径 | 说明 | 鉴权 |
+|---|---|---|
+| GET `/api/state` | 渠道健康/水位/熔断状态 | 否 |
+| GET `/api/scores` | 评估评分 + 晋升建议 | 否 |
+| GET `/api/history` | 切换历史（操作人/原因/时间） | 否 |
+| GET `/api/alerts` | 最近告警 | 否 |
+| GET `/api/metrics` | Prometheus 直方图（Exemplar 挂 trace_id 可下钻） | 否 |
+| GET `/api/traffic` | 流量分配比例 | 否 |
+| POST `/api/switch` | 切冠军，**必须 `{"to":"...","confirm":true}`** | 是 |
+| POST `/api/traffic` / `/api/weights` / `/api/fault` | 调流量/权重/注入故障 | 是 |
+
+操作人审计：POST 时带 `X-Operator: 你的名字` 头，会记录进切换历史。
+
+## 五、数据从哪来
+
+- **默认**：`internal/sim` 生成器现场捏（6 渠道 × 3 模型，含小时曲线/涨价/故障窗口/50 用户），固定 seed 可复现。
+- **自己的 CSV**：`-csv 你的文件.csv`（列：time,group,model,channel_id,prompt_tokens,completion_tokens,quota,use_time_ms，见 `testdata/sample_logs.csv`）。
+- **接生产网关真实数据**：只改 `internal/sim/source.go` 一处（统一取数入口），其余全部不动。
+
+## 六、常见问题
+
+| 问题 | 解决 |
+|---|---|
+| 端口 8080 被占 | `ADMIN_PORT=8089 go run ./cmd/admin` |
+| 结果每次不一样 | 补 `-seed 42`（默认就有，除非改了） |
+| 想模拟"渠道涨价/故障" | 改 `internal/sim/generator.go` 的 `DefaultChannels()` 画像 |
+| 想加新策略 | 在 `internal/strategy` 建文件实现 `Router` 接口，引擎 `NewEngine()` 里注册 |
+| 跑完有 `data/` 目录 | `-data` 落盘的审计 JSONL，删掉即回纯内存模式 |
+
+## 七、代码地图（改哪里）
+
+```
+internal/sim/       模拟数据生成器 + 真值判官 Oracle（数据源头）
+internal/strategy/  策略池：S0~S5 + 熔断器 + 水位 + 粘性 + 自适应（核心算法）
+internal/replay/    回放引擎：历史数据反事实执行 + 严格归因
+internal/eval/      评估：95% 置信区间 + 综合评分 + 晋升建议
+internal/metrics/   零依赖 Prometheus 直方图（Exemplar）
+internal/store/     JSONL 审计落盘
+internal/stats/     知识库聚合 + 训练/测试切分
+internal/health/    渠道健康探测
+cmd/arena p1 p2 p3 p4 scenarios admin   各演示入口
+docs/               方案 v5/v6、升级对照、接入计划、本说明
+```

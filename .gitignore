@@ -1,0 +1,14 @@
+# 系统垃圾
+.DS_Store
+._*
+
+# 构建产物
+/routing-arena
+/routing-arena-demo
+/bin/
+*.out
+*.exe
+
+# 运行时输出
+/out/
+*.log
